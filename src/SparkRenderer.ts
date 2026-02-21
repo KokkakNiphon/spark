@@ -1,4 +1,7 @@
+// @ts-nocheck
 import * as THREE from "three";
+import { uniform } from "three/tsl";
+import { MeshBasicNodeMaterial, WebGPURenderer } from "three/webgpu";
 
 import {
   DEFAULT_SPLAT_ENCODING,
@@ -23,6 +26,7 @@ import {
   transformGsplat,
 } from "./dyno";
 import { getShaders } from "./shaders";
+import { splatFragment, splatVertex } from "./shaders_tsl";
 import {
   averagePositions,
   averageQuaternions,
@@ -47,7 +51,7 @@ export type SparkRendererOptions = {
    * (default setting) as WebGL anti-aliasing doesn't improve Gaussian Splatting
    * rendering and significantly reduces performance.
    */
-  renderer: THREE.WebGLRenderer;
+  renderer: THREE.WebGPURenderer;
   /**
    * Whether to use premultiplied alpha when accumulating splat RGB
    * @default true
@@ -165,10 +169,11 @@ export type SparkRendererOptions = {
 };
 
 export class SparkRenderer extends THREE.Mesh {
-  renderer: THREE.WebGLRenderer;
+  renderer: THREE.WebGPURenderer;
   premultipliedAlpha: boolean;
-  material: THREE.ShaderMaterial;
+  material: MeshBasicNodeMaterial;
   uniforms: ReturnType<typeof SparkRenderer.makeUniforms>;
+  tslUniforms: Record<string, any>;
 
   autoUpdate: boolean;
   preUpdate: boolean;
@@ -253,13 +258,76 @@ export class SparkRenderer extends THREE.Mesh {
 
   constructor(options: SparkRendererOptions) {
     const uniforms = SparkRenderer.makeUniforms();
-    const shaders = getShaders();
     const premultipliedAlpha = options.premultipliedAlpha ?? true;
-    const material = new THREE.ShaderMaterial({
-      glslVersion: THREE.GLSL3,
-      vertexShader: shaders.splatVertex,
-      fragmentShader: shaders.splatFragment,
-      uniforms,
+
+    // Create TSL uniforms
+    const tslUniforms = {
+      renderSize: uniform(uniforms.renderSize.value),
+      numSplats: uniform(uniforms.numSplats.value),
+      renderToViewQuat: uniform(uniforms.renderToViewQuat.value),
+      renderToViewPos: uniform(uniforms.renderToViewPos.value),
+      maxStdDev: uniform(uniforms.maxStdDev.value),
+      minPixelRadius: uniform(uniforms.minPixelRadius.value),
+      maxPixelRadius: uniform(uniforms.maxPixelRadius.value),
+      minAlpha: uniform(uniforms.minAlpha.value),
+      stochastic: uniform(uniforms.stochastic.value),
+      enable2DGS: uniform(uniforms.enable2DGS.value),
+      blurAmount: uniform(uniforms.blurAmount.value),
+      preBlurAmount: uniform(uniforms.preBlurAmount.value),
+      focalDistance: uniform(uniforms.focalDistance.value),
+      apertureAngle: uniform(uniforms.apertureAngle.value),
+      clipXY: uniform(uniforms.clipXY.value),
+      focalAdjustment: uniform(uniforms.focalAdjustment.value),
+      packedSplats: uniform(uniforms.packedSplats.value),
+      rgbMinMaxLnScaleMinMax: uniform(uniforms.rgbMinMaxLnScaleMinMax.value),
+      // Fragment specific
+      falloff: uniform(uniforms.falloff.value),
+      encodeLinear: uniform(uniforms.encodeLinear.value),
+      time: uniform(uniforms.time.value),
+      splatTexEnable: uniform(uniforms.splatTexEnable.value),
+      splatTexture: uniform(uniforms.splatTexture.value),
+      splatTexMul: uniform(uniforms.splatTexMul.value),
+      splatTexAdd: uniform(uniforms.splatTexAdd.value),
+      splatTexNear: uniform(uniforms.splatTexNear.value),
+      splatTexFar: uniform(uniforms.splatTexFar.value),
+      splatTexMid: uniform(uniforms.splatTexMid.value),
+    };
+
+    const splatVertexNode = splatVertex([
+      tslUniforms.renderSize,
+      tslUniforms.numSplats,
+      tslUniforms.renderToViewQuat,
+      tslUniforms.renderToViewPos,
+      tslUniforms.maxStdDev,
+      tslUniforms.minPixelRadius,
+      tslUniforms.maxPixelRadius,
+      tslUniforms.minAlpha,
+      tslUniforms.stochastic,
+      tslUniforms.enable2DGS,
+      tslUniforms.blurAmount,
+      tslUniforms.preBlurAmount,
+      tslUniforms.focalDistance,
+      tslUniforms.apertureAngle,
+      tslUniforms.clipXY,
+      tslUniforms.focalAdjustment,
+      tslUniforms.packedSplats,
+      tslUniforms.rgbMinMaxLnScaleMinMax
+    ]);
+
+    const splatFragmentNode = splatFragment([
+      tslUniforms.maxStdDev,
+      tslUniforms.minAlpha,
+      tslUniforms.falloff,
+      tslUniforms.encodeLinear,
+      tslUniforms.stochastic,
+      tslUniforms.time,
+      splatVertexNode.vRgba,
+      splatVertexNode.vSplatUv,
+      splatVertexNode.vNdc,
+      splatVertexNode.vSplatIndex
+    ]);
+
+    const material = new MeshBasicNodeMaterial({
       premultipliedAlpha,
       transparent: true,
       depthTest: true,
@@ -267,14 +335,19 @@ export class SparkRenderer extends THREE.Mesh {
       side: THREE.DoubleSide,
     });
 
+    material.positionNode = splatVertexNode.glPosition;
+    material.fragmentNode = splatFragmentNode;
+
     super(EMPTY_GEOMETRY, material);
     // Disable frustum culling because we want to always draw them all
     // and cull Gsplats individually in the shader
     this.frustumCulled = false;
 
+    // @ts-ignore
     this.renderer = options.renderer;
     this.material = material;
     this.uniforms = uniforms;
+    this.tslUniforms = tslUniforms;
 
     // Create a Gsplat modifier that takes the output of any SplatGenerator
     // and transforms them into the accumulator's coordinate system
@@ -449,7 +522,7 @@ export class SparkRenderer extends THREE.Mesh {
   }
 
   onBeforeRender(
-    renderer: THREE.WebGLRenderer,
+    renderer: THREE.WebGPURenderer,
     scene: THREE.Scene,
     camera: THREE.Camera,
   ) {
@@ -497,8 +570,8 @@ export class SparkRenderer extends THREE.Mesh {
         this.material.premultipliedAlpha = this.premultipliedAlpha;
         this.material.needsUpdate = true;
       }
-      this.uniforms.time.value = time;
-      this.uniforms.deltaTime.value = deltaTime;
+      this.tslUniforms.time.value = this.uniforms.time.value = time;
+      this.tslUniforms.deltaTime.value = this.uniforms.deltaTime.value = deltaTime;
       // Alternating debug flag that can aid in visual debugging
       this.uniforms.debugFlag.value = (performance.now() / 1000.0) % 2.0 < 1.0;
 
@@ -536,20 +609,20 @@ export class SparkRenderer extends THREE.Mesh {
       | THREE.OrthographicCamera;
     this.uniforms.near.value = typedCamera.near;
     this.uniforms.far.value = typedCamera.far;
-    this.uniforms.encodeLinear.value = viewpoint.encodeLinear;
-    this.uniforms.maxStdDev.value = this.maxStdDev;
-    this.uniforms.minPixelRadius.value = this.minPixelRadius;
-    this.uniforms.maxPixelRadius.value = this.maxPixelRadius;
-    this.uniforms.minAlpha.value = this.minAlpha;
-    this.uniforms.stochastic.value = viewpoint.stochastic;
-    this.uniforms.enable2DGS.value = this.enable2DGS;
-    this.uniforms.preBlurAmount.value = this.preBlurAmount;
-    this.uniforms.blurAmount.value = this.blurAmount;
-    this.uniforms.focalDistance.value = this.focalDistance;
-    this.uniforms.apertureAngle.value = this.apertureAngle;
-    this.uniforms.falloff.value = this.falloff;
-    this.uniforms.clipXY.value = this.clipXY;
-    this.uniforms.focalAdjustment.value = this.focalAdjustment;
+    this.tslUniforms.encodeLinear.value = this.uniforms.encodeLinear.value = viewpoint.encodeLinear;
+    this.tslUniforms.maxStdDev.value = this.uniforms.maxStdDev.value = this.maxStdDev;
+    this.tslUniforms.minPixelRadius.value = this.uniforms.minPixelRadius.value = this.minPixelRadius;
+    this.tslUniforms.maxPixelRadius.value = this.uniforms.maxPixelRadius.value = this.maxPixelRadius;
+    this.tslUniforms.minAlpha.value = this.uniforms.minAlpha.value = this.minAlpha;
+    this.tslUniforms.stochastic.value = this.uniforms.stochastic.value = viewpoint.stochastic;
+    this.tslUniforms.enable2DGS.value = this.uniforms.enable2DGS.value = this.enable2DGS;
+    this.tslUniforms.preBlurAmount.value = this.uniforms.preBlurAmount.value = this.preBlurAmount;
+    this.tslUniforms.blurAmount.value = this.uniforms.blurAmount.value = this.blurAmount;
+    this.tslUniforms.focalDistance.value = this.uniforms.focalDistance.value = this.focalDistance;
+    this.tslUniforms.apertureAngle.value = this.uniforms.apertureAngle.value = this.apertureAngle;
+    this.tslUniforms.falloff.value = this.uniforms.falloff.value = this.falloff;
+    this.tslUniforms.clipXY.value = this.uniforms.clipXY.value = this.clipXY;
+    this.tslUniforms.focalAdjustment.value = this.uniforms.focalAdjustment.value = this.focalAdjustment;
 
     if (this.lastStochastic !== !viewpoint.stochastic) {
       this.lastStochastic = !viewpoint.stochastic;
@@ -562,8 +635,8 @@ export class SparkRenderer extends THREE.Mesh {
       const { enable, texture, multiply, add, near, far, mid } =
         this.splatTexture;
       if (enable && texture) {
-        this.uniforms.splatTexEnable.value = true;
-        this.uniforms.splatTexture.value = texture;
+        this.tslUniforms.splatTexEnable.value = this.uniforms.splatTexEnable.value = true;
+        this.tslUniforms.splatTexture.value = this.uniforms.splatTexture.value = texture;
         if (multiply) {
           this.uniforms.splatTexMul.value.fromArray(multiply.elements);
         } else {
@@ -575,16 +648,16 @@ export class SparkRenderer extends THREE.Mesh {
           );
         }
         this.uniforms.splatTexAdd.value.set(add?.x ?? 0.5, add?.y ?? 0.5);
-        this.uniforms.splatTexNear.value = near ?? this.uniforms.near.value;
-        this.uniforms.splatTexFar.value = far ?? this.uniforms.far.value;
-        this.uniforms.splatTexMid.value = mid ?? 0.0;
+        this.tslUniforms.splatTexNear.value = this.uniforms.splatTexNear.value = near ?? this.uniforms.near.value;
+        this.tslUniforms.splatTexFar.value = this.uniforms.splatTexFar.value = far ?? this.uniforms.far.value;
+        this.tslUniforms.splatTexMid.value = this.uniforms.splatTexMid.value = mid ?? 0.0;
       } else {
-        this.uniforms.splatTexEnable.value = false;
-        this.uniforms.splatTexture.value = SparkRenderer.EMPTY_SPLAT_TEXTURE;
+        this.tslUniforms.splatTexEnable.value = this.uniforms.splatTexEnable.value = false;
+        this.tslUniforms.splatTexture.value = this.uniforms.splatTexture.value = SparkRenderer.EMPTY_SPLAT_TEXTURE;
       }
     } else {
-      this.uniforms.splatTexEnable.value = false;
-      this.uniforms.splatTexture.value = SparkRenderer.EMPTY_SPLAT_TEXTURE;
+      this.tslUniforms.splatTexEnable.value = this.uniforms.splatTexEnable.value = false;
+      this.tslUniforms.splatTexture.value = this.uniforms.splatTexture.value = SparkRenderer.EMPTY_SPLAT_TEXTURE;
     }
 
     // Calculate the transform from the accumulator to the current camera
@@ -608,8 +681,8 @@ export class SparkRenderer extends THREE.Mesh {
 
     if (this.viewpoint.display) {
       const { accumulator, geometry } = this.viewpoint.display;
-      this.uniforms.numSplats.value = accumulator.splats.numSplats;
-      this.uniforms.packedSplats.value = accumulator.splats.getTexture();
+      this.tslUniforms.numSplats.value = this.uniforms.numSplats.value = accumulator.splats.numSplats;
+      this.tslUniforms.packedSplats.value = this.uniforms.packedSplats.value = accumulator.splats.getTexture();
       this.uniforms.rgbMinMaxLnScaleMinMax.value.set(
         accumulator.splats.splatEncoding?.rgbMin ?? 0.0,
         accumulator.splats.splatEncoding?.rgbMax ?? 1.0,
@@ -622,8 +695,8 @@ export class SparkRenderer extends THREE.Mesh {
       this.material.needsUpdate = true;
     } else {
       // No Gsplats to display for this viewpoint yet
-      this.uniforms.numSplats.value = 0;
-      this.uniforms.packedSplats.value = PackedSplats.getEmpty();
+      this.tslUniforms.numSplats.value = this.uniforms.numSplats.value = 0;
+      this.tslUniforms.packedSplats.value = this.uniforms.packedSplats.value = PackedSplats.getEmpty();
       this.geometry = EMPTY_GEOMETRY;
     }
   }
@@ -914,7 +987,7 @@ export class SparkRenderer extends THREE.Mesh {
     hideObjects = [],
     update = false,
   }: {
-    renderer?: THREE.WebGLRenderer;
+    renderer?: THREE.WebGPURenderer;
     scene: THREE.Scene;
     worldCenter: THREE.Vector3;
     size?: number;

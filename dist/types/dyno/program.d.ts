@@ -6,6 +6,8 @@ export declare class DynoProgram {
     inputs: Record<string, string>;
     outputs: Record<string, string>;
     shader: string;
+    globals: Set<string>;
+    statements: string[];
     uniforms: Record<string, THREE.IUniform>;
     updaters: (() => void)[];
     constructor({ graph, inputs, outputs, template, }: {

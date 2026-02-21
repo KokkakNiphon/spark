@@ -1,3 +1,4 @@
+import { MeshBasicNodeMaterial } from 'three/webgpu';
 import { SplatEncoding } from './PackedSplats';
 import { RgbaArray } from './RgbaArray';
 import { SparkViewpoint, SparkViewpointOptions } from './SparkViewpoint';
@@ -11,7 +12,7 @@ export type SparkRendererOptions = {
      * (default setting) as WebGL anti-aliasing doesn't improve Gaussian Splatting
      * rendering and significantly reduces performance.
      */
-    renderer: THREE.WebGLRenderer;
+    renderer: THREE.WebGPURenderer;
     /**
      * Whether to use premultiplied alpha when accumulating splat RGB
      * @default true
@@ -128,10 +129,11 @@ export type SparkRendererOptions = {
     splatEncoding?: SplatEncoding;
 };
 export declare class SparkRenderer extends THREE.Mesh {
-    renderer: THREE.WebGLRenderer;
+    renderer: THREE.WebGPURenderer;
     premultipliedAlpha: boolean;
-    material: THREE.ShaderMaterial;
+    material: MeshBasicNodeMaterial;
     uniforms: ReturnType<typeof SparkRenderer.makeUniforms>;
+    tslUniforms: Record<string, any>;
     autoUpdate: boolean;
     preUpdate: boolean;
     needsUpdate: boolean;
@@ -284,7 +286,7 @@ export declare class SparkRenderer extends THREE.Mesh {
     private maybeAllocAccumulator;
     releaseAccumulator(accumulator: SplatAccumulator): void;
     newViewpoint(options: SparkViewpointOptions): SparkViewpoint;
-    onBeforeRender(renderer: THREE.WebGLRenderer, scene: THREE.Scene, camera: THREE.Camera): void;
+    onBeforeRender(renderer: THREE.WebGPURenderer, scene: THREE.Scene, camera: THREE.Camera): void;
     prepareViewpoint(viewpoint?: SparkViewpoint): void;
     update({ scene, viewToWorld, }: {
         scene: THREE.Scene;
@@ -297,7 +299,7 @@ export declare class SparkRenderer extends THREE.Mesh {
     }): boolean;
     private compileScene;
     renderEnvMap({ renderer, scene, worldCenter, size, near, far, hideObjects, update, }: {
-        renderer?: THREE.WebGLRenderer;
+        renderer?: THREE.WebGPURenderer;
         scene: THREE.Scene;
         worldCenter: THREE.Vector3;
         size?: number;
