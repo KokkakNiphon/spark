@@ -9,6 +9,8 @@ export class DynoProgram {
   inputs: Record<string, string>;
   outputs: Record<string, string>;
   shader: string;
+  globals: Set<string>;
+  statements: string[];
   uniforms: Record<string, THREE.IUniform>;
   updaters: (() => void)[];
 
@@ -40,6 +42,8 @@ export class DynoProgram {
       compile,
     });
 
+    this.globals = compile.globals;
+    this.statements = statements;
     this.shader = template.generate({ globals: compile.globals, statements });
     this.uniforms = compile.uniforms;
     this.updaters = compile.updaters;

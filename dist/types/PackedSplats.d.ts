@@ -1,4 +1,4 @@
-import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
+import { StorageTexture } from 'three/webgpu';
 import { GsplatGenerator } from './SplatGenerator';
 import { SplatFileType } from './SplatLoader';
 import { DynoProgram, DynoProgramTemplate, DynoUniform } from './dyno';
@@ -37,7 +37,7 @@ export declare class PackedSplats {
     splatEncoding?: SplatEncoding;
     initialized: Promise<PackedSplats>;
     isInitialized: boolean;
-    target: THREE.WebGLArrayRenderTarget | null;
+    target: StorageTexture | null;
     source: THREE.DataArrayTexture | null;
     needsUpdate: boolean;
     dyno: DynoUniform<typeof TPackedSplats, "packedSplats">;
@@ -84,13 +84,12 @@ export declare class PackedSplats {
         generator: GsplatGenerator;
         base: number;
         count: number;
-        renderer: THREE.WebGLRenderer;
+        renderer: THREE.WebGPURenderer;
     }): {
         nextBase: number;
     };
     static programTemplate: DynoProgramTemplate | null;
     static generatorProgram: WeakMap<GsplatGenerator, DynoProgram>;
-    static fullScreenQuad: FullScreenQuad;
 }
 export declare const dynoPackedSplats: (packedSplats?: PackedSplats) => DynoPackedSplats;
 export declare class DynoPackedSplats extends DynoUniform<typeof TPackedSplats, "packedSplats", {

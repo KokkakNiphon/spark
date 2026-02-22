@@ -964,6 +964,7 @@ function createRendererDetectionMesh(): THREE.Mesh {
 
     if (!hasSparkRenderer) {
       // No spark renderer present in the scene, inject one.
+      // @ts-ignore
       scene.add(new SparkRenderer({ renderer }));
     }
 

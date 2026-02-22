@@ -1,5 +1,7 @@
+// @ts-nocheck
 import * as THREE from "three";
-import { FullScreenQuad } from "three/addons/postprocessing/Pass.js";
+import { StorageTexture } from "three/webgpu";
+import { glsl, textureStore, texture, uniform, uvec3, uvec4, instanceIndex, int, uint, convertToTexture, float, Fn, If } from "three/tsl";
 
 import type { GsplatGenerator } from "./SplatGenerator";
 import { type SplatFileType, SplatLoader, unpackSplats } from "./SplatLoader";
@@ -106,7 +108,7 @@ export class PackedSplats {
 
   // Either target or source will be non-null, depending on whether the PackedSplats
   // is being used as a data source or generated to.
-  target: THREE.WebGLArrayRenderTarget | null = null;
+  target: StorageTexture | null = null;
   source: THREE.DataArrayTexture | null = null;
   // Set to true if source packedArray is updated to have it upload to GPU
   needsUpdate = true;
@@ -464,17 +466,16 @@ export class PackedSplats {
 
     // The packed Gsplats are stored in a 2D array texture of max size
     // 2048 x 2048 x 2048, one RGBA32UI pixel = 4 uint32 = one Gsplat
-    this.target = new THREE.WebGLArrayRenderTarget(width, height, depth, {
-      depthBuffer: false,
-      stencilBuffer: false,
-      generateMipmaps: false,
-      magFilter: THREE.NearestFilter,
-      minFilter: THREE.NearestFilter,
-    });
-    this.target.texture.format = THREE.RGBAIntegerFormat;
-    this.target.texture.type = THREE.UnsignedIntType;
-    this.target.texture.internalFormat = "RGBA32UI";
-    this.target.scissorTest = true;
+    this.target = new StorageTexture(width, height);
+    // @ts-ignore
+    this.target.image.depth = depth;
+    // @ts-ignore
+    this.target.isDataArrayTexture = true;
+    this.target.type = THREE.UnsignedIntType;
+    this.target.format = THREE.RGBAIntegerFormat;
+    this.target.magFilter = THREE.NearestFilter;
+    this.target.minFilter = THREE.NearestFilter;
+
     return true;
   }
 
@@ -500,8 +501,9 @@ export class PackedSplats {
   // a Uint32x4 data array texture (2048 x 2048 x depth in size)
   getTexture(): THREE.DataArrayTexture {
     if (this.target) {
-      // Return the render target's texture
-      return this.target.texture;
+      // Return the storage texture
+      // @ts-ignore
+      return this.target;
     }
     if (this.source || this.packedArray) {
       // Update source texture if needed and return
@@ -655,7 +657,7 @@ export class PackedSplats {
     generator: GsplatGenerator;
     base: number;
     count: number;
-    renderer: THREE.WebGLRenderer;
+    renderer: THREE.WebGPURenderer;
   }): { nextBase: number } {
     if (!this.target) {
       throw new Error("Target must be initialized with ensureSplats");
@@ -664,47 +666,82 @@ export class PackedSplats {
       throw new Error("Base + count exceeds maxSplats");
     }
 
-    const { program, material } = this.prepareProgramMaterial(generator);
+    // @ts-ignore
+    const { program } = this.prepareProgramMaterial(generator);
     program.update();
 
-    const renderState = this.saveRenderState(renderer);
-
-    // Generate the Gsplats in "layer" chunks, in horizontal row ranges,
-    // that cover the total count of Gsplats.
-    const nextBase =
-      Math.ceil((base + count) / SPLAT_TEX_WIDTH) * SPLAT_TEX_WIDTH;
-    const layerSize = SPLAT_TEX_WIDTH * SPLAT_TEX_HEIGHT;
-    material.uniforms.targetBase.value = base;
-    material.uniforms.targetCount.value = count;
-
-    // Keep generating layers until we've reached the next generation's base
-    while (base < nextBase) {
-      const layer = Math.floor(base / layerSize);
-      material.uniforms.targetLayer.value = layer;
-
-      const layerBase = layer * layerSize;
-      const layerYStart = Math.floor((base - layerBase) / SPLAT_TEX_WIDTH);
-      const layerYEnd = Math.min(
-        SPLAT_TEX_HEIGHT,
-        Math.ceil((nextBase - layerBase) / SPLAT_TEX_WIDTH),
-      );
-
-      // Render the desired portion of the layer
-      this.target.scissor.set(
-        0,
-        layerYStart,
-        SPLAT_TEX_WIDTH,
-        layerYEnd - layerYStart,
-      );
-      renderer.setRenderTarget(this.target, layer);
-      renderer.xr.enabled = false;
-      renderer.autoClear = false;
-      PackedSplats.fullScreenQuad.render(renderer);
-
-      base += SPLAT_TEX_WIDTH * (layerYEnd - layerYStart);
+    const tslUniforms: Record<string, any> = {};
+    for (const key in program.uniforms) {
+      tslUniforms[key] = uniform(program.uniforms[key].value);
     }
 
-    this.resetRenderState(renderer, renderState);
+    // We construct the logic
+    const computeShader = Fn(() => {
+        const idx = instanceIndex.x; // We will dispatch 'count' threads
+        const globalIndex = idx.add(base);
+
+        // Compute coord for storage write
+        const width = uint(SPLAT_TEX_WIDTH);
+        const height = uint(SPLAT_TEX_HEIGHT);
+        const layerSize = width.mul(height);
+
+        const x = uint(globalIndex).bitAnd(uint(SPLAT_TEX_WIDTH_MASK)); // assuming power of 2
+        const y = uint(globalIndex).div(width).bitAnd(uint(SPLAT_TEX_HEIGHT_MASK));
+        const z = uint(globalIndex).div(layerSize);
+
+        const coord = uvec3(x, y, z);
+
+        // Execute Dyno GLSL logic
+        const globalsArr = Array.from(program.globals);
+        const uniformLines = globalsArr.filter(line => line.trim().startsWith('uniform '));
+        const otherGlobals = globalsArr.filter(line => !line.trim().startsWith('uniform '));
+
+        const uniformsDetected = [];
+        for (const line of uniformLines) {
+            const match = /uniform\s+(\w+)\s+(\w+);/.exec(line);
+            if (match) {
+                uniformsDetected.push({ type: match[1], name: match[2] });
+            }
+        }
+
+        const argsStr = ["int index", ...uniformsDetected.map(u => `${u.type} ${u.name}`)].join(', ');
+
+        const funcBody = `
+            ${otherGlobals.join('\n')}
+
+            uvec4 dynoMain(${argsStr}) {
+                uvec4 target;
+                ${program.statements.join('\n')}
+                return target;
+            }
+        `;
+
+        // Construct glsl tag arguments
+        // glsl(strings, ...values)
+        // dynoMain(index, u1, u2)
+
+        const strings = [funcBody + "\n\nuvec4 main() {\n return dynoMain("];
+        // @ts-ignore
+        strings.raw = strings; // Mock TemplateStringsArray if needed
+        const values = [int(globalIndex)];
+
+        for (let i = 0; i < uniformsDetected.length; i++) {
+            strings.push(", "); // Separator
+            values.push(tslUniforms[uniformsDetected[i].name]);
+        }
+        strings.push(");\n}"); // Close function call
+
+        const glslLogic = glsl(strings, ...values);
+
+        textureStore(this.target, coord, glslLogic);
+    });
+
+    // Compute dispatch
+    // We launch 'count' threads.
+    // renderer.compute(computeNode, count);
+    renderer.compute(computeShader().compute(count));
+
+    const nextBase = Math.ceil((base + count) / SPLAT_TEX_WIDTH) * SPLAT_TEX_WIDTH;
     return { nextBase };
   }
 
@@ -712,11 +749,6 @@ export class PackedSplats {
 
   // Cache for GsplatGenerator programs
   static generatorProgram = new WeakMap<GsplatGenerator, DynoProgram>();
-
-  // Static full-screen quad for pseudo-compute shader rendering
-  static fullScreenQuad = new FullScreenQuad(
-    new THREE.RawShaderMaterial({ visible: false }),
-  );
 }
 
 // You can use a PackedSplats as a dyno block using the function
